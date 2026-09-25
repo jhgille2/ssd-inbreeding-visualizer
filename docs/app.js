@@ -173,77 +173,285 @@ function renderStats() {
   }
 }
 
-/* ---------- meiosis panel ---------- */
+/* ---------- animated meiosis ---------- */
+const MEIOSIS = { hh: 0, runId: 0, ui: null };
+const lerp = (a, b, k) => a + (b - a) * k;
+const clamp01 = v => Math.min(1, Math.max(0, v));
+const easeInOut = k => (k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2);
+const hasRAF = typeof requestAnimationFrame === 'function';
+const reducedMotion = () =>
+  typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const M_W = 960, M_ML = 170, M_MR = 30, M_PLOT = M_W - M_ML - M_MR, M_H = 372, M_RH = 24;
+const Y_SEP = [86, 120, 196, 230];    // homologs apart
+const Y_BUN = [122, 148, 178, 204];  // paired bundle
+const Y_SPR = [58, 132, 206, 280];   // segregated gametes
+const X_MID = 175;                   // crossover marks between bundled rows 1 and 2
+const Xof = cm => M_ML + (cm / 100) * M_PLOT;
+
+// One meiosis in the parent plant, as four chromatids. Rows 0/3 are the parental
+// (non-interacting) sister chromatids; rows 1/2 are the non-sister pair that
+// crosses over. rows[1] is the recombinant starting on homolog 1, rows[2] the
+// reciprocal recombinant; transmittedRow is the one kept by single-seed descent.
+function buildMeiosisModel(gi, hh) {
+  const d = state.data, pos = d.marker_pos_cm;
+  const parent = d.generations[gi - 1], gen = d.generations[gi];
+  const P1 = parent.homologs[0].origin, P2 = parent.homologs[1].origin;
+  const T = gen.homologs[hh].origin;
+  const xo = gen.homologs[hh].crossovers_cm.slice().sort((a, b) => a - b);
+  const rec = s => {
+    const g = new Array(pos.length);
+    for (let i = 0; i < pos.length; i++) {
+      let k = 0;
+      while (k < xo.length && xo[k] <= pos[i]) k++;
+      g[i] = ((k + s) % 2 === 0) ? P1[i] : P2[i];
+    }
+    return g;
+  };
+  const r0 = rec(0), r1 = rec(1);
+  const same = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false; return true; };
+  const start = same(r0, T) ? 0 : 1;
+  return {
+    P1, P2, pos, xo, start, parentLabel: parent.label, genLabel: gen.label, hh,
+    rows: [P1, r0, r1, P2], transmittedRow: 1 + start,
+  };
+}
+
+// Intervals (in cM) where a chromatid's origin changes after the exchange.
+function exchangedIntervals(before, after, pos) {
+  const ivs = [];
+  let s = -1;
+  for (let i = 0; i < before.length; i++) {
+    const ch = before[i] !== after[i];
+    if (ch && s < 0) s = i;
+    if (!ch && s >= 0) { ivs.push({ x0: pos[s], x1: pos[i], from: before[s], to: after[s] }); s = -1; }
+  }
+  if (s >= 0) ivs.push({ x0: pos[s], x1: pos[pos.length - 1], from: before[s], to: after[s] });
+  return ivs;
+}
+
+function staticBar(g, runs, h) {
+  runs.forEach(r => {
+    S('rect', {
+      x: Xof(r.x0), y: 0, width: Math.max(0.5, Xof(r.x1) - Xof(r.x0)),
+      height: h, fill: originColor(r.v), rx: 2,
+    }, g);
+  });
+  S('rect', {
+    x: Xof(0), y: 0, width: Xof(100) - Xof(0), height: h,
+    fill: 'none', stroke: INK, 'stroke-width': 1, rx: 2,
+  }, g);
+}
+
 function renderMeiosis() {
   const sec = document.getElementById('meiosis-section');
   sec.style.display = state.showMeiosis ? '' : 'none';
   if (!state.showMeiosis) return;
-
+  MEIOSIS.runId++; // cancel any running animation
   const box = document.getElementById('meiosis-viz');
   box.innerHTML = '';
-  const d = state.data, pos = d.marker_pos_cm;
-  const gi = state.genIdx, gen = d.generations[gi];
+  const gi = state.genIdx;
 
   if (gi === 0) {
-    box.className = 'meiosis-grid';
     const card = document.createElement('div');
     card.className = 'meiosis-card';
-    card.innerHTML = `<h3>No meiosis to replay</h3>
-      <p>The F1's two homologs are the intact parental chromosomes &mdash; one full copy from
-      each parent. Crossovers first appear in the gametes produced <em>by</em> this plant
-      (advance to F2 to see them).</p>`;
+    card.innerHTML = '<h3>No meiosis to replay</h3><p>The F1\u2019s two homologs are the intact ' +
+      'parental chromosomes \u2014 one full copy from each parent. Crossovers first appear in the ' +
+      'gametes produced <em>by</em> this plant (advance to F2 to watch one happen).</p>';
     box.appendChild(card);
     return;
   }
 
-  box.className = 'meiosis-grid two';
-  const parent = d.generations[gi - 1];
-  const W = 480, ML = 14, MR = 14, plotW = W - ML - MR;
-  const X = cm => ML + (cm / 100) * plotW;
+  const ctrl = document.createElement('div');
+  ctrl.className = 'meiosis-controls';
+  const seg = document.createElement('div');
+  seg.className = 'seg';
+  seg.setAttribute('role', 'group');
+  seg.setAttribute('aria-label', 'Choose meiosis');
+  [0, 1].forEach(h => {
+    const b = document.createElement('button');
+    b.textContent = `Meiosis ${h + 1} \u2192 Homolog ${h + 1}`;
+    if (h === MEIOSIS.hh) b.className = 'active';
+    b.addEventListener('click', () => { MEIOSIS.hh = h; renderMeiosis(); });
+    seg.appendChild(b);
+  });
+  const replay = document.createElement('button');
+  replay.id = 'replay-meiosis';
+  replay.textContent = '\u21BB Replay meiosis';
+  replay.addEventListener('click', () => renderMeiosis());
+  ctrl.appendChild(seg);
+  ctrl.appendChild(replay);
+  box.appendChild(ctrl);
 
-  for (let hh = 0; hh < 2; hh++) {
-    const card = document.createElement('div');
-    card.className = 'meiosis-card';
-    const h3 = document.createElement('h3');
-    h3.textContent = `Meiosis ${hh + 1} in the ${parent.label} plant → Homolog ${hh + 1}`;
-    card.appendChild(h3);
-    const wrap = document.createElement('div');
-    wrap.className = 'figure-box';
-    wrap.style.marginTop = '0.4rem';
-    card.appendChild(wrap);
+  const stage = document.createElement('div');
+  stage.className = 'meiosis-stage';
+  box.appendChild(stage);
+  const svg = S('svg', {
+    viewBox: `0 0 ${M_W} ${M_H}`, role: 'img', 'aria-label': 'Animated meiosis',
+  }, stage);
 
-    const H = 218;
-    const svg = S('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img',
-      'aria-label': `Meiosis ${hh + 1} in the ${parent.label} plant` }, wrap);
-    text(svg, ML, 18, `Parent ${parent.label} homolog pair`, { 'font-size': 12, fill: MUTED });
-    chromBar(svg, X, 30, 24, runsOf(parent.homologs[0].origin, pos), [], { showXO: false });
-    chromBar(svg, X, 62, 24, runsOf(parent.homologs[1].origin, pos), [], { showXO: false });
-    // crossover X marks between the homologs
-    gen.homologs[hh].crossovers_cm.forEach(xo => {
-      const cx = X(xo), cy = 58;
-      const g2 = S('g', {}, svg);
-      S('line', { x1: cx - 5, y1: cy - 5, x2: cx + 5, y2: cy + 5, stroke: COL_XO, 'stroke-width': 2.2 }, g2);
-      S('line', { x1: cx - 5, y1: cy + 5, x2: cx + 5, y2: cy - 5, stroke: COL_XO, 'stroke-width': 2.2 }, g2);
-      title(g2, `Crossover at ${xo.toFixed(1)} cM`);
-    });
-    // arrow to the transmitted gamete
-    S('line', { x1: W / 2, y1: 100, x2: W / 2, y2: 128, stroke: INK, 'stroke-width': 1.6,
-      'marker-end': 'url(#arr)' }, svg);
-    const defs = S('defs', {}, svg);
-    const marker = S('marker', { id: 'arr', markerWidth: 8, markerHeight: 8, refX: 4, refY: 4, orient: 'auto' }, defs);
-    S('path', { d: 'M0,0 L8,4 L0,8 z', fill: INK }, marker);
-    text(svg, ML, 148, 'Transmitted gamete (one recombinant chromatid)', { 'font-size': 12, fill: MUTED });
-    chromBar(svg, X, 158, 28, runsOf(gen.homologs[hh].origin, pos),
-      state.showXO ? gen.homologs[hh].crossovers_cm : [], {});
-
-    const p = document.createElement('p');
-    const nx = gen.homologs[hh].crossovers_cm.length;
-    p.innerHTML = `One of two independent meioses in the ${parent.label} plant. ` +
-      `${nx} crossover${nx === 1 ? '' : 's'} occurred; the highlighted chromatid is the gamete ` +
-      `that became Homolog ${hh + 1} of the ${gen.label} plant shown above.`;
-    card.appendChild(p);
-    box.appendChild(card);
+  const model = buildMeiosisModel(gi, MEIOSIS.hh);
+  const rows = [];
+  for (let i = 0; i < 4; i++) {
+    const g = S('g', { transform: `translate(0 ${Y_SEP[i]})` }, svg);
+    staticBar(g, runsOf(model.rows[i], model.pos), M_RH);
+    rows.push(g);
   }
+  const homLabels = [
+    text(svg, M_ML - 12, (Y_SEP[0] + Y_SEP[1]) / 2 + 8, 'Homolog 1',
+      { 'text-anchor': 'end', 'font-size': 13, fill: INK }),
+    text(svg, M_ML - 12, (Y_SEP[2] + Y_SEP[3]) / 2 + 8, 'Homolog 2',
+      { 'text-anchor': 'end', 'font-size': 13, fill: INK }),
+  ];
+  text(svg, M_ML, 30, `One meiosis in the ${model.parentLabel} plant`,
+    { 'font-size': 13, fill: MUTED });
+  const top = S('g', {}, svg);
+  const cap = document.createElement('p');
+  cap.className = 'phase-caption';
+  stage.appendChild(cap);
+
+  MEIOSIS.ui = { svg, rows, homLabels, top, cap, model, xg: null, xmarks: [], movers: null, moverRects: [] };
+  playMeiosis();
+}
+
+function playMeiosis() {
+  const ui = MEIOSIS.ui, model = ui.model;
+  const run = ++MEIOSIS.runId;
+  const t = model.transmittedRow;
+  const n = model.xo.length;
+  const ivs = exchangedIntervals(model.P1, model.rows[1], model.pos);
+  const setRows = ys => ys.forEach((y, i) =>
+    ui.rows[i].setAttribute('transform', `translate(0 ${y})`));
+  const setCap = html => { ui.cap.innerHTML = html; };
+
+  const steps = [
+    {
+      dur: 900,
+      cap: '<strong>1 \u00B7 Synapsis.</strong> The parent\u2019s homologs pair up. Each homolog ' +
+        'is two identical sister chromatids; crossovers will form between non-sister chromatids.',
+      frame: k => {
+        setRows(Y_SEP.map((y, i) => lerp(y, Y_BUN[i], k)));
+        ui.homLabels.forEach(el => el.setAttribute('opacity', 1 - k));
+      },
+    },
+    {
+      dur: 1100,
+      cap: n
+        ? `<strong>2 \u00B7 Crossing over.</strong> ${n} crossover${n === 1 ? '' : 's'} ` +
+          `form${n === 1 ? 's' : ''} between non-sister chromatids (\u00D7 marks).`
+        : '<strong>2 \u00B7 Crossing over.</strong> No crossovers in this meiosis ' +
+          '\u2014 all four chromatids stay parental.',
+      start: () => {
+        ui.xg = S('g', { opacity: 0 }, ui.svg);
+        ui.xmarks = model.xo.map(xo => {
+          const g = S('g', { transform: `translate(${Xof(xo)} ${X_MID}) scale(0.4)` }, ui.xg);
+          S('line', { x1: -7, y1: -7, x2: 7, y2: 7, stroke: COL_XO, 'stroke-width': 2.6 }, g);
+          S('line', { x1: -7, y1: 7, x2: 7, y2: -7, stroke: COL_XO, 'stroke-width': 2.6 }, g);
+          const tg = S('g', {}, g);
+          title(tg, `Crossover at ${xo.toFixed(1)} cM`);
+          return { g, x: Xof(xo) };
+        });
+      },
+      frame: k => {
+        if (!ui.xg) return;
+        const s = k < 0.7 ? (k / 0.7) * 1.2 : 1.2 - 0.2 * ((k - 0.7) / 0.3);
+        ui.xg.setAttribute('opacity', k);
+        ui.xmarks.forEach(m =>
+          m.g.setAttribute('transform', `translate(${m.x} ${X_MID}) scale(${s.toFixed(3)})`));
+      },
+    },
+    {
+      dur: 2400,
+      cap: ivs.length
+        ? '<strong>3 \u00B7 Exchange.</strong> At each crossover the non-sister chromatids ' +
+          'break and rejoin \u2014 segments are physically swapped between them.'
+        : '<strong>3 \u00B7 Exchange.</strong> With no crossovers there is nothing to exchange.',
+      start: () => {
+        ui.movers = S('g', {}, ui.top);
+        ui.moverRects = [];
+        ivs.forEach(iv => {
+          const w = Math.max(0.5, Xof(iv.x1) - Xof(iv.x0));
+          // Each moving rect starts exactly over the same-colored segment it
+          // detaches from, then slides to the other chromatid.
+          const rA = S('rect', {
+            x: Xof(iv.x0), y: Y_BUN[2], width: w, height: M_RH,
+            fill: originColor(iv.to), stroke: INK, 'stroke-width': 1, rx: 2,
+          }, ui.movers);
+          const rB = S('rect', {
+            x: Xof(iv.x0), y: Y_BUN[1], width: w, height: M_RH,
+            fill: originColor(iv.from), stroke: INK, 'stroke-width': 1, rx: 2,
+          }, ui.movers);
+          ui.moverRects.push({ rA, rB });
+        });
+      },
+      frame: k => {
+        ui.moverRects.forEach((m, idx) => {
+          const kk = easeInOut(clamp01(k * 1.6 - idx * 0.25));
+          m.rA.setAttribute('y', lerp(Y_BUN[2], Y_BUN[1], kk).toFixed(1));
+          m.rB.setAttribute('y', lerp(Y_BUN[1], Y_BUN[2], kk).toFixed(1));
+        });
+      },
+      end: () => {
+        if (ui.movers) ui.movers.setAttribute('opacity', 0);
+        [1, 2].forEach(i => {
+          ui.rows[i].innerHTML = '';
+          staticBar(ui.rows[i], runsOf(model.rows[i], model.pos), M_RH);
+        });
+      },
+    },
+    {
+      dur: 1400,
+      cap: `<strong>4 \u00B7 Segregation.</strong> The four chromatids separate into gametes. ` +
+        `Single-seed descent keeps a single seed \u2014 only the highlighted gamete is transmitted, ` +
+        `becoming Homolog ${model.hh + 1} of the ${model.genLabel} plant.`,
+      frame: k => {
+        setRows(Y_BUN.map((y, i) => lerp(y, Y_SPR[i], k)));
+        if (ui.xg) ui.xg.setAttribute('opacity', 1 - k);
+      },
+      end: () => {
+        const kinds = n
+          ? ['parental', 'recombinant', 'recombinant', 'parental']
+          : ['parental', 'parental', 'parental', 'parental'];
+        kinds.forEach((kind, i) => {
+          text(ui.svg, M_ML - 12, Y_SPR[i] + 17,
+            i === t ? `${kind} \u2605 transmitted` : kind,
+            {
+              'text-anchor': 'end', 'font-size': 12,
+              fill: i === t ? INK : MUTED, 'font-weight': i === t ? 'bold' : 'normal',
+            });
+          if (i !== t) ui.rows[i].setAttribute('opacity', 0.35);
+        });
+        S('rect', {
+          x: Xof(0) - 7, y: Y_SPR[t] - 7, width: M_PLOT + 14, height: M_RH + 14,
+          fill: 'none', stroke: '#c9a227', 'stroke-width': 3, rx: 8,
+        }, ui.top);
+      },
+    },
+  ];
+
+  if (!hasRAF || reducedMotion()) {
+    // No animation support (or reduced motion): jump straight to the final state.
+    steps.forEach(st => { setCap(st.cap); if (st.start) st.start(); st.frame(1); if (st.end) st.end(); });
+    return;
+  }
+  let i = 0;
+  const next = () => {
+    if (run !== MEIOSIS.runId) return;
+    if (i >= steps.length) return;
+    const st = steps[i++];
+    setCap(st.cap);
+    if (st.start) st.start();
+    const t0 = performance.now();
+    const tick = now => {
+      if (run !== MEIOSIS.runId) return;
+      const k = Math.min(1, (now - t0) / st.dur);
+      st.frame(easeInOut(k));
+      if (k < 1) requestAnimationFrame(tick);
+      else { if (st.end) st.end(); setTimeout(next, 280); }
+    };
+    requestAnimationFrame(tick);
+  };
+  next();
 }
 
 /* ---------- trajectory ---------- */
