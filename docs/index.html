@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Single-Seed Descent: From Cross to Inbred Line</title>
+<meta name="description" content="Interactive visualization of how single-seed descent turns a segregating cross into inbred lines: meiosis, recombination, and the rise of homozygosity, generation by generation.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>Single-Seed Descent: From Cross to Inbred Line</h1>
+    <p class="subtitle">
+      Two inbred parents are crossed, and the progeny are selfed for seven generations,
+      one seed at a time. Follow one chromosome of one lineage from the F<sub>1</sub> to the
+      F<sub>8</sub> and watch recombination shuffle the parental genomes while repeated
+      selfing drives the line toward homozygosity.
+    </p>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+  <section id="controls" aria-label="Visualization controls">
+    <div class="stepper">
+      <button id="prev-gen" aria-label="Previous generation">&larr;</button>
+      <input type="range" id="gen-slider" min="0" max="7" step="1" value="0" aria-label="Generation">
+      <button id="next-gen" aria-label="Next generation">&rarr;</button>
+      <span id="gen-label">F1</span>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="toggle-xo" checked> Crossover marks</label>
+      <label><input type="checkbox" id="toggle-meiosis" checked> Meiosis panel</label>
+    </div>
+    <div>
+      <button id="new-line-btn">Simulate a new line</button>
+      <div id="line-seed"></div>
+    </div>
+  </section>
+
+  <section aria-label="Chromosome figure">
+    <h2 id="fig-title">The F1 plant &mdash; one chromosome pair</h2>
+    <div class="figure-box">
+      <div id="homolog-viz"></div>
+      <div class="legend">
+        <span><span class="swatch a"></span>Parent A segment</span>
+        <span><span class="swatch b"></span>Parent B segment</span>
+        <span><span class="xomark">&times;</span> crossover in the meiosis that formed this homolog</span>
+      </div>
+    </div>
+    <div class="stats-grid" id="stats-grid"></div>
+    <div class="gen-caption" id="gen-caption"></div>
+  </section>
+
+  <section id="meiosis-section" aria-label="Meiosis">
+    <h2>Meiosis: where the mosaic comes from</h2>
+    <p>
+      Each homolog of the plant above was delivered by one gamete, and each gamete was
+      produced by one meiosis in the parent plant. The panels below replay those two
+      meioses: the parent's chromosome pair, the crossover points, and the recombinant
+      chromatid that was transmitted.
+    </p>
+    <div class="meiosis-grid two" id="meiosis-viz"></div>
+  </section>
+
+  <section aria-label="Homozygosity trajectory">
+    <h2>Homozygosity across generations</h2>
+    <p>
+      Observed homozygosity of the tracked line (solid) against the expectation for
+      repeated selfing (dashed): each selfing generation fixes, on average, half of the
+      heterozygosity that remains.
+    </p>
+    <div class="figure-box"><div id="trajectory-viz"></div></div>
+  </section>
+
+  <section aria-label="How to read this">
+    <h2>How to read this figure</h2>
+    <ul>
+      <li><strong>Homolog 1 / Homolog 2</strong> are the two copies of one chromosome in a single plant.
+        Blue blocks trace back to Parent A, amber blocks to Parent B. A block boundary inside a
+        homolog is the footprint of a crossover.</li>
+      <li><strong>Genotype</strong> combines the two homologs: solid blue or amber where the plant is
+        homozygous, split blue/amber where it is still heterozygous (upper half = Homolog 1 allele,
+        lower half = Homolog 2 allele).</li>
+      <li><strong>&times; marks</strong> show where crossovers occurred in the meiosis that produced
+        each gamete. Hover over one for its position in centimorgans.</li>
+      <li>Crossovers keep happening every generation, but once a region is homozygous they leave no
+        visible trace &mdash; recombining two identical homologs changes nothing.</li>
+    </ul>
+
+    <h2>Why repeated selfing produces inbred lines</h2>
+    <p>
+      The F<sub>1</sub> is heterozygous at every locus that differed between the parents. When it is
+      selfed, each locus segregates 1:2:1, so half the progeny genome &mdash; in expectation &mdash;
+      becomes homozygous. Selfing again halves the remaining heterozygosity, and so on:
+      F<sub>2</sub> ~50%, F<sub>3</sub> ~75%, F<sub>4</sub> ~87.5%, approaching 100% asymptotically.
+      Recombination does not create this homozygosity; it only reshuffles which parental segments
+      sit together on each chromosome, producing the mosaic pattern. That is why two inbred lines
+      from the same cross can both be ~99% homozygous yet carry different combinations of parental
+      segments &mdash; the raw material a breeder selects among.
+    </p>
+    <p>
+      <strong>Single-seed descent</strong> means advancing the population by taking exactly one seed
+      from each plant each generation, with no selection. It is fast, cheap, and preserves the
+      population's genetic variance, at the cost of giving selection nothing to act on until lines
+      are nearly fixed.
+    </p>
+  </section>
+
+  <section aria-label="Model and assumptions">
+    <h2>Model &amp; assumptions</h2>
+    <ul>
+      <li>One representative 100&nbsp;cM chromosome with 1,000 evenly spaced markers. Soybean has 20
+        chromosome pairs (2n&nbsp;=&nbsp;40); every chromosome pair in the plant follows the same process.</li>
+      <li>Parents are fully homozygous and fixed for contrasting alleles at every marker, so allele
+        identity equals parental origin at every position.</li>
+      <li>Meiosis follows the Haldane model: crossover counts are Poisson with mean equal to the
+        chromosome length in Morgans, positions are uniform, and there is no crossover interference.</li>
+      <li>Each selfing uses two independent meioses in the parent; one random chromatid is transmitted
+        per gamete (the single seed). No selection, no mutation, no segregation distortion.</li>
+      <li>The default dataset was generated with <code>scripts/generate_data.py</code>, a direct port of
+        the AlphaSimR reference implementation in <code>R/simulate_ssd.R</code>. Pressing
+        &ldquo;Simulate a new line&rdquo; re-runs the same model in your browser with a fresh random seed,
+        so the wobble of individual lines around the expectation can be explored.</li>
+    </ul>
+    <div class="note">
+      The committed dataset is one realized lineage (seed 174), chosen because its homozygosity
+      trajectory tracks the expectation closely. Any single line will deviate by chance; the
+      expectation holds over many lines.
+    </div>
+  </section>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>
+      Simulation engine: <a href="https://github.com/gaynorr/AlphaSimR">AlphaSimR</a>
+      (Gaynor et al. 2021, <em>G3</em> 11(2): jkaa017, doi:10.1093/g3journal/jkaa017).
+      Source code and data pipeline:
+      <a href="https://github.com/jhgille2/ssd-inbreeding-visualizer">jhgille2/ssd-inbreeding-visualizer</a>.
+    </p>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
